@@ -1,12 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Modality, Type } from "@google/genai";
-
-// Initialize the Google Gemini AI SDK
-// The API key is assumed to be available in the environment variables.
-const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
-
+import { Modality, Type } from "@google/genai";
 
 // --- Type Definitions ---
 interface ChatMessage {
@@ -85,7 +80,6 @@ const shadeColor = (color: string, percent: number): string => {
 // --- Main App Component ---
 const App = () => {
   const [activePage, setActivePage] = useState('chat');
-  const [apiReady] = useState(true); // Assume ready, update on error
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
 
   useEffect(() => {
@@ -194,10 +188,6 @@ const App = () => {
 
 
   const renderPage = () => {
-    if (!apiReady) {
-        return <div className="page"><div className="header"><h1>خطأ</h1></div><div className="error-message">لم يتمكن التطبيق من الاتصال بالخادم. قد يكون مفتاح API غير صحيح أو مفقود في إعدادات Netlify.</div></div>;
-    }
-
     switch (activePage) {
       case 'chat':
         return <ChatPage messages={chatHistory} setMessages={setChatHistory} />;
@@ -483,38 +473,25 @@ const ChatPage: React.FC<ChatPageProps> = ({ messages, setMessages }) => {
             const currentMessagePayload = { role: userMessage.role, parts };
             const contents = [currentMessagePayload];
 
-            const response = await fetch('https://n8n-tyfesdxn.us-west-1.clawcloudrun.com/webhook/ai.chat', {
+            const response = await fetch('/.netlify/functions/gemini-proxy', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                // Sending only the current message, not the full history
-                body: JSON.stringify({ contents: contents }),
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: contents,
+                }),
             });
 
             if (!response.ok) {
                 const errorText = await response.text();
-                throw new Error(`Webhook request failed with status ${response.status}: ${errorText}`);
+                throw new Error(`Proxy request failed with status ${response.status}: ${errorText}`);
             }
 
             const responseData = await response.json();
             
-            // Handle potentially varied response formats from the new endpoint
-            let aiText = '';
-            if (responseData.text) {
-                aiText = responseData.text;
-            } else if (responseData.answer) {
-                aiText = responseData.answer;
-            } else if (responseData.message) {
-                aiText = responseData.message;
-            } else if (responseData.reply) {
-                aiText = responseData.reply;
-            } else if (responseData.choices && responseData.choices[0]?.message?.content) {
-                aiText = responseData.choices[0].message.content;
-            } else {
-                // As a fallback, stringify the whole response for debugging purposes.
-                aiText = JSON.stringify(responseData, null, 2);
-            }
+            const aiText = responseData.text || 'عذراً، لم أتلق رداً صالحاً.';
 
             const aiMessage: ChatMessage = { role: 'model', text: aiText };
             setMessages([...newMessages, aiMessage]);
@@ -983,30 +960,32 @@ const SummarizerPage = () => {
                 }
             }
     
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [{ parts: messageParts }],
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                            summary: { type: Type.STRING }
+            const proxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: [{ parts: messageParts }],
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: Type.OBJECT,
+                            properties: {
+                                summary: { type: Type.STRING }
+                            },
                         },
                     },
-                },
+                })
             });
+    
+            if (!proxyResponse.ok) {
+                throw new Error("Proxy request failed.");
+            }
+            const response = await proxyResponse.json();
     
             let summaryText: string | null = null;
             try {
                 let jsonStr = response.text.trim();
-                // The Gemini API with responseSchema should return valid JSON,
-                // but this handling is kept as a robust fallback.
-                if (jsonStr.startsWith('```json')) {
-                    jsonStr = jsonStr.substring(7, jsonStr.length - 3).trim();
-                } else if (jsonStr.startsWith('```')) {
-                    jsonStr = jsonStr.substring(3, jsonStr.length - 3).trim();
-                }
                 const parsedJson = JSON.parse(jsonStr);
 
                 if (parsedJson && parsedJson.summary) {
@@ -1015,7 +994,6 @@ const SummarizerPage = () => {
             } catch (e) {
                 console.warn("Could not parse JSON response from summarizer, falling back to plain text.", response.text);
                 if (response.text && response.text.trim().length > 0) {
-                    // Check if the plain text is not a JSON string before assigning
                     if (!response.text.trim().startsWith('{')) {
                        summaryText = response.text;
                     }
@@ -1062,42 +1040,47 @@ const SummarizerPage = () => {
                 ---
             `;
             
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [{ parts: [{ text: promptText }] }],
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                            questions: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        question: { type: Type.STRING },
-                                        type: { type: Type.STRING },
-                                        answer: { type: Type.STRING },
-                                        options: {
-                                            type: Type.ARRAY,
-                                            items: { type: Type.STRING }
-                                        },
+            const proxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: [{ parts: [{ text: promptText }] }],
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: Type.OBJECT,
+                            properties: {
+                                questions: {
+                                    type: Type.ARRAY,
+                                    items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            question: { type: Type.STRING },
+                                            type: { type: Type.STRING },
+                                            answer: { type: Type.STRING },
+                                            options: {
+                                                type: Type.ARRAY,
+                                                items: { type: Type.STRING }
+                                            },
+                                        }
                                     }
                                 }
                             }
-                        }
+                        },
                     },
-                },
+                })
             });
+
+            if (!proxyResponse.ok) {
+                throw new Error("Proxy request failed for generating questions.");
+            }
+
+            const response = await proxyResponse.json();
 
             let parsedJson;
             try {
                 let jsonStr = response.text.trim();
-                if (jsonStr.startsWith('```json')) {
-                    jsonStr = jsonStr.substring(7, jsonStr.length - 3).trim();
-                } else if (jsonStr.startsWith('```')) {
-                    jsonStr = jsonStr.substring(3, jsonStr.length - 3).trim();
-                }
                 parsedJson = JSON.parse(jsonStr);
             } catch (e) {
                 console.error("Failed to parse questions JSON:", e);
@@ -1132,11 +1115,18 @@ const SummarizerPage = () => {
                 ---
             `;
             
-             const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [{ parts: [{ text: promptText }] }],
+            const proxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: [{ parts: [{ text: promptText }] }],
+                })
             });
 
+            if (!proxyResponse.ok) throw new Error('Proxy request failed.');
+
+            const response = await proxyResponse.json();
             setExamples(response.text);
         } catch (err) {
             console.error("Error generating examples:", err);
@@ -1583,10 +1573,21 @@ const TextToSpeechPage = () => {
                 }));
 
                 const prompt = `استخرج كل النص من الصورة/الصور المرفقة. أجب بالنص المستخرج فقط.`;
-                const textResponse = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
-                    contents: [{ parts: [{ text: prompt }, ...imageParts] }],
+                
+                const textProxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'gemini-2.5-flash',
+                        contents: [{ parts: [{ text: prompt }, ...imageParts] }],
+                    })
                 });
+
+                if (!textProxyResponse.ok) {
+                    throw new Error('Failed to extract text from images via proxy.');
+                }
+
+                const textResponse = await textProxyResponse.json();
                 
                 if (textResponse.text) {
                     combinedText = `${combinedText}\n\n${textResponse.text}`.trim();
@@ -1599,20 +1600,21 @@ const TextToSpeechPage = () => {
                 return;
             }
 
-            const ttsResponse = await ai.models.generateContent({
-                model: "gemini-2.5-flash-preview-tts",
-                contents: [{ parts: [{ text: combinedText }] }],
-                config: {
-                  responseModalities: [Modality.AUDIO],
-                  speechConfig: {
-                    voiceConfig: {
-                      prebuiltVoiceConfig: { voiceName: voice || 'Kore' },
-                    },
-                  },
-                },
+            const ttsProxyResponse = await fetch('/.netlify/functions/tts-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    text: combinedText,
+                    voice: voice || 'Kore'
+                })
             });
 
-            const audioContent = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (!ttsProxyResponse.ok) {
+                throw new Error('TTS proxy request failed.');
+            }
+
+            const ttsResponseData = await ttsProxyResponse.json();
+            const audioContent = ttsResponseData.audioContent;
 
             if (audioContent) {
                 setAudioData(audioContent);
@@ -1861,46 +1863,49 @@ const QuizBuilderPage = () => {
                 }
             }
 
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [{ parts: messageParts }],
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                            questions: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        question: { type: Type.STRING },
-                                        type: { type: Type.STRING },
-                                        answer: { type: Type.STRING },
-                                        options: { type: Type.ARRAY, items: { type: Type.STRING } },
+            const proxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: [{ parts: messageParts }],
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: Type.OBJECT,
+                            properties: {
+                                questions: {
+                                    type: Type.ARRAY,
+                                    items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            question: { type: Type.STRING },
+                                            type: { type: Type.STRING },
+                                            answer: { type: Type.STRING },
+                                            options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                                        }
                                     }
                                 }
                             }
-                        }
+                        },
                     },
-                },
+                })
             });
+
+            if (!proxyResponse.ok) {
+                throw new Error("Proxy request failed.");
+            }
+            const response = await proxyResponse.json();
 
             let parsedJson;
             try {
-                 let jsonStr = response.text.trim();
-                if (jsonStr.startsWith('```json')) {
-                    jsonStr = jsonStr.substring(7, jsonStr.length - 3).trim();
-                } else if (jsonStr.startsWith('```')) {
-                    jsonStr = jsonStr.substring(3, jsonStr.length - 3).trim();
-                }
+                let jsonStr = response.text.trim();
                 parsedJson = JSON.parse(jsonStr);
             } catch(e) {
                 console.error("Failed to parse quiz JSON:", e);
                 throw new Error("Failed to parse quiz JSON from model response.");
             }
             setQuestions(parsedJson.questions || []);
-
 
             if (!parsedJson.questions || parsedJson.questions.length === 0) {
                 setError('لم يتمكن النموذج من إنشاء أسئلة. حاول مرة أخرى بموضوع مختلف.');
@@ -1950,27 +1955,26 @@ const QuizBuilderPage = () => {
     
                     Adhere strictly to this JSON format.
                 `;
-                return ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
-                    contents: [{ parts: [{ text: prompt }] }],
-                    config: { 
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: Type.OBJECT,
-                            properties: {
-                                score: { type: Type.INTEGER },
-                                feedback: { type: Type.STRING },
+                return fetch('/.netlify/functions/gemini-proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'gemini-2.5-flash',
+                        contents: [{ parts: [{ text: prompt }] }],
+                        config: { 
+                            responseMimeType: "application/json",
+                            responseSchema: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    score: { type: Type.INTEGER },
+                                    feedback: { type: Type.STRING },
+                                }
                             }
-                        }
-                    },
-                }).then(response => {
+                        },
+                    })
+                }).then(res => res.json()).then(response => {
                     try {
                         let jsonStr = response.text.trim();
-                        if (jsonStr.startsWith('```json')) {
-                            jsonStr = jsonStr.substring(7, jsonStr.length - 3).trim();
-                        } else if (jsonStr.startsWith('```')) {
-                            jsonStr = jsonStr.substring(3, jsonStr.length - 3).trim();
-                        }
                         const result = JSON.parse(jsonStr);
                         return { index: q.index, ...result };
                     } catch (e) {
@@ -2300,38 +2304,42 @@ const IQTestPage = () => {
         `;
 
         try {
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [{ parts: [{ text: promptText }] }],
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                            questions: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        question: { type: Type.STRING },
-                                        options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                                        correctAnswer: { type: Type.STRING },
+            const proxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: [{ parts: [{ text: promptText }] }],
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: Type.OBJECT,
+                            properties: {
+                                questions: {
+                                    type: Type.ARRAY,
+                                    items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            question: { type: Type.STRING },
+                                            options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                                            correctAnswer: { type: Type.STRING },
+                                        }
                                     }
                                 }
                             }
-                        }
+                        },
                     },
-                },
+                })
             });
+
+            if (!proxyResponse.ok) {
+                throw new Error("Proxy request failed.");
+            }
+            const response = await proxyResponse.json();
 
             let parsedJson;
             try {
                 let jsonStr = response.text.trim();
-                if (jsonStr.startsWith('```json')) {
-                    jsonStr = jsonStr.substring(7, jsonStr.length - 3).trim();
-                } else if (jsonStr.startsWith('```')) {
-                    jsonStr = jsonStr.substring(3, jsonStr.length - 3).trim();
-                }
                 parsedJson = JSON.parse(jsonStr);
             } catch (e) {
                 console.error("Failed to parse IQ test JSON:", e);
@@ -2650,28 +2658,31 @@ const MindMapPage = () => {
                 }
             }
             
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [{ parts: messageParts }],
-                config: {
-                    responseMimeType: "application/json",
-                },
+            const proxyResponse = await fetch('/.netlify/functions/gemini-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'gemini-2.5-flash',
+                    contents: [{ parts: messageParts }],
+                    config: {
+                        responseMimeType: "application/json",
+                    },
+                })
             });
+
+            if (!proxyResponse.ok) {
+                throw new Error("Proxy request failed.");
+            }
+            const response = await proxyResponse.json();
             
             let parsedJson;
             try {
                 let jsonStr = response.text.trim();
-                if (jsonStr.startsWith('```json')) {
-                    jsonStr = jsonStr.substring(7, jsonStr.length - 3).trim();
-                } else if (jsonStr.startsWith('```')) {
-                    jsonStr = jsonStr.substring(3, jsonStr.length - 3).trim();
-                }
                 parsedJson = JSON.parse(jsonStr);
             } catch (e) {
                 console.error("Failed to parse mind map JSON:", e);
                 throw new Error("Failed to parse mind map JSON from model response.");
             }
-
 
             if (parsedJson.mindMap && parsedJson.mindMap.topic) {
                 setMindMapData(parsedJson.mindMap);
