@@ -25,5 +25,8 @@
     "vite": "^5.0.8"
   },
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  }
 }
